@@ -1,0 +1,296 @@
+---
+title: "Faculty Citation Analysis 2023"
+author: "Sylvia Orner"
+date: "2023-11-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+
+```
+#Part 1 - Setup
+
+This project primarily uses the openalexR and tidyverse packages. By providing an email to OpenAlex, we can get into the polite pool which has a faster, more consistent response time. 
+
+Note: Throughout documentation, U of S = University of Scranton. 
+
+
+```{r}
+#Load packages
+
+library(openalexR)
+library(tidyverse)
+
+#adding email for the polite pool
+
+options(openalexR.mailto="sylvia.orner@scranton.edu")
+```
+
+#Part 2 - Data Extration and Clean-Up
+
+##2.1 Data Extraction
+
+Using the openalexR package, I'm retrieving all publications association with the U of S's ROR (Research Organization Registry) id.  For this project, I'm using 10 years of data. 
+
+Note : Data was last retrieved on 9/26/23. 
+
+```{r}
+UofSworks.df <-oa_fetch(
+  entity="works",
+  institutions.ror=c("05xwb6v37"),
+  from_publication_date ="2013-01-01")
+```
+
+##2.2 Data Cleanup
+
+To better explore the data, I want to unnest both the concepts field and the author field.  For concepts, I want to distill that list to root level concepts to possibly sort publications by discipline. For authors, I want to filter to only U of S authors to help verify accuracy of results. 
+
+```{r}
+#Unnesting Authors
+WorksUnique.df<-Works.df%>%
+  mutate(author=lapply(author, function(x){
+    names(x) <-paste0(names(x), "author")
+    return(x)
+  }))%>%
+  unnest(author)
+
+#Spot Checking U of S affiliated authors
+WorksUnique.df%>%filter(institution_rorauthor== "https://ror.org/05xwb6v37")
+```
+###Problem 1
+
+A problem emerges in examining the unnested authors. Some authors at Penn State Scranton are being incorrectly associated with U of S. Additional code was added to remove them along with all other non-U of S authors. 
+
+```{r}
+#Removing Authors Unaffiliated Authors
+WorksUnique.df<-WorksUnique.df%>%
+filter(institution_rorauthor== "https://ror.org/05xwb6v37" & !str_detect(au_affiliation_rawauthor, "Penn"))
+
+#Deduplicating list in case of multiple U of S authors associated with a single work
+WorksUnique.df <-WorksUnique.df[!duplicated(WorksUnique.df$id),]
+```
+Moving on...
+
+```{r}
+#Unnesting Concepts
+WorksByConcept.df<-UofSWorksUnique.df%>%
+  mutate(concepts=lapply(concepts, function(x){
+    names(x) <-paste0(names(x), "concepts")
+    return(x)
+  }))%>%
+  unnest(concepts)
+
+#Filtering to root concepts(level = 0) with a concept score > 0.   
+
+#Filtering out humanities publications. 
+HumanitiesWorks.df <-WorksByConcept.df%>%
+  filter(display_nameconcepts %in% c("Political Science", "Philosophy", "Art", "Sociology", "History", "Psychology", "Economics", "Business")& scoreconcepts > 0 & levelconcepts == 0)
+
+#Filtering out sciences publications
+SciencesWorks.df <-WorksByConcept.df%>%
+  filter(display_nameconcepts %in% c("Mathematics", "Computer Science", "Geology", "Chemistry", "Biology", "Engineering", "Geography", "Materials Science", "Physics", "Environmental Sciences", "Medicine") & scoreconcepts >0 & levelconcepts == 0)
+
+```
+Note on concepts - some publications may have more than one root concept and thus appear in both lists. This was the case for me.  Ultimately, there was approximately 35% overlap between sciences and humanities for my data.  Further statistical analysis of both categories provided nearly identical results so the final project used the faculty publication data set as  a whole instead of breaking it down by concepts. 
+
+Thus, going forward, only the WorksUnique.df dataframe is used. 
+
+###Problem 2
+
+Overall, investigating result from OpenAlex leads me to believe that while the list of faculty publications retrieved is comprehensive, it is by no means exhaustive. There were a number of titles I expected to see that did not appear on the list.  In all instances, they were books that were published with small university presses. Overall, I believe the total number of titles that didn't make the list is relatively small so I feel comfortable proceeding with the dataset. 
+
+#Part 3 - Retrieving and Extracting Information on Works Cited
+
+Here we isolate the unique works cited associated with each publication. 
+
+Note - Retrieving data for each publication via OpenAlex requires the use of a for loop since queries are capped at 50 requests. Depending on the number of publications being retrieved, this can be a very time consuming process. In my case, I was retrieving data on over 16,000 publications, and it took approximately 10 minutes. 
+
+```{r}
+#Isolating and unpacking data in the referenced_works column
+WorksCited <- as.list(unique(do.call(rbind,WorksUnique.df$referenced_works)))
+
+#Removing any values of NA and any duplicate values
+WorksCited <-unique(WorksCited) %>%discard(is.na)
+
+#Creating an empty dataframe to store the results of the for loop.
+WorksCited.df <-data.frame()
+
+#Running the loop to retrieve works cited data (may take some time to run)
+for(i in seq(1, length(WorksCited), by=50)){
+  batch_identifiers <-WorksCited[i:min(i+49, length(WorksCited))]
+  batch_data <-oa_fetch(identifier=batch_identifiers)
+  WorksCited.df<-rbind(WorksCited.df, batch_data)
+}
+
+```
+##3.1 Saving Data
+
+I chose to save my dataframes locally for easier future retrieval. 
+```{r}
+#Saving dataframes for future reloading
+UofSWorksUnique.df <-read_rds("UofSWorksUnique.Rds")
+WorksCited.df <-read_rds("WorksCited.Rds")
+```
+#Part 4 - Statistical Analysis
+
+Here, I calculated some basic statistics associated with both our faculty publication dataset and our faculty citation dataset. 
+
+##4.1 Publications Cited by Decade
+
+How old are cited articles? Note - Because I could find no easy way to associate each article cited with the citing article, I was unable to determine the age of article at the time of citation, but settled on reporting by date of publication.
+```{r}
+#Mean and Median Publication Date of Works Cited
+mean(WorksCited.df$publication_year)
+median (WorksCited.df$publication_year)
+
+#Charting Citations by Year of Publication
+PubYears.df <-WorksCited.df %>% count(publication_year, sort = TRUE)
+
+#Organizing Years into Decades for Easier Viewing
+PubYears.df <-PubYears.df %>% mutate(Decade = (publication_year %/% 10)*10)
+
+ggplot(PubYears.df, aes(x=reorder(Decade, -Decade), y=n))+
+  geom_bar(stat="identity")+
+  labs(x= "Decade of Publication", y= "Number of Publications Cited", title="Citation by Decade")
+```
+##4.2 Open Access Works Published by U of S Authors
+
+How often are faculty publishing open access? Has this number changed over time? 
+```{r}
+#Filtering Open Access Articles Published
+UofSWorksUnique.df%>%count(is_oa==TRUE)
+
+#Charting OA Publications through the years (excluding 2023 because the year is incomplete) 
+OAWorksbyYear.df <-UofSWorksUnique.df%>%
+  filter(is_oa==TRUE& publication_year!= "2023")%>%
+  count(publication_year, sort=TRUE)
+
+ggplot(OAWorksbyYear.df, aes(x=reorder(publication_year,-publication_year),y=n, group=1))+
+  geom_line(color="black")+
+  geom_point()+
+  labs(x= "Year", y= "Number of Open Access Publications", title="Open Access Publications by Year")
+```
+##4.3 U of S Works Published by Year
+
+How many works are published by U of S per year? Has that number changed over time? 
+```{r}
+#Filtering Publications by Year
+WorksbyYear.df <-UofSWorksUnique.df%>%filter(publication_year!="2023") %>%count(publication_year, sort=TRUE) 
+
+#Calculating Mean and Median works per year. 
+median(WorksbyYear.df$n)
+mean(WorksbyYear.df$n)
+
+#Charting publications by year
+ggplot(WorksbyYear.df, aes(x=reorder(publication_year,-publication_year),y=n, group=1))+
+  geom_line(color="black")+
+  geom_point()+
+labs(x= "Year", y= "Number of Publications", title="Publications by Year")
+
+```
+##4.4 Frequently Used Publishers
+
+What publishers are faculty most frequently publishing with? What publishers are faculty most frequently using in their citations? 
+```{r}
+#Counting publishers most frequently used by faculty
+UofSWorksUnique.df%>%count(host_organization, sort=TRUE)
+
+#Counting publishers most frequently cited by faculty
+WorksCited.df%>%count(host_organization, sort=TRUE)
+```
+##4.5 Types of Materials Published and Cited
+
+What types of materials are faculty publishing (article, book, etc.)?  What types of materials are they citing? 
+```{r}
+#Counting material types most frequently published by faculty
+UofSWorksUnique.df%>% count(type, sort=TRUE)
+
+#Counting material types most frequently cited by faculty
+WorksCited.df%>% count(type, sort=TRUE)
+
+#Counting Open Access works cited
+WorksCited.df %>%count(is_oa, sort=TRUE)
+
+#Counting Gold OA journals cited
+WorksCited.df%>%filter(oa_status=="gold")%>%count(so, sort=TRUE)
+```
+#Part 5 - Comparing Works Cited to Library Holdings
+
+Because statistical analysis found that over 90% of faculty citations were from journal articles, this project chose to focus only on articles and journal holdings. Data on journal holdings was extracted from EBSCO's Knowledge Base which serves as our primary knowledge base for tracking subscriptions. 
+
+##5.1 Loading and Cleaning Holdings Data
+
+Title was chosen as the match point between holdings and citations. Ideally, ISSN would have been a cleaner match point, but investigation of holdings data showed that approximately 30% of our holdings data was missing an ISSN. So, title seemed the better way to go even though more clean up is involved. 
+```{r}
+#Loading U of S Journal Holdings 
+UofSJournals.df <-read_csv("UofSJournals.csv")
+
+#Converting managed coverage dates to dates. 
+UofSJournals.df$ManagedCoverageBegin <- as.Date(UofSJournals.df$ManagedCoverageBegin)
+
+#Assigning arbitrary end date to current subscriptions and converting to date. 
+UofSJournals.df$ManagedCoverageEnd[UofSJournals.df$ManagedCoverageEnd=="Present"] <-"2023-09-01"
+UofSJournals.df$ManagedCoverageEnd <- as.Date (UofSJournals.df$ManagedCoverageEnd)
+
+#Converting all titles to lower case for easier matching.
+UofSJournals.df$Title <-tolower(UofSJournals.df$Title)
+
+#Dropping leading "the" in journal titles for easier matching.
+UofSJournals.df$Title <- sub("^The\\s", "", UofSJournals.df$Title, ignore.case = TRUE)
+
+#Converting & to "and" for easier matching. 
+UofSJournals.df$Title <-gsub("&", "and", UofSJournals.df$Title)
+
+#Removing any titles that do not contain coverage information. 
+UofSJournals.df <- UofSJournals.df%>%
+  filter(!if_all(c(ManagedCoverageBegin, ManagedCoverageEnd), is.na))
+```
+##5.2 Further Cleaning of Works Cited Data
+
+Additional cleanup on the works cited dataframe was conducted so that only journal articles were being considered. Any Gold OA titles were also excluded. Additionally, the same conversions to titles and dates were made. 
+```{r}
+#Filtering to articles that are not OA Gold
+WorksCitedFiltered.df <-WorksCited.df%>%filter(type=="article" & oa_status!="gold")
+
+#Removing any publications without a title
+WorksCitedFiltered.df<-WorksCitedFiltered.df[!is.na(WorksCitedFiltered.df$so),]
+
+#Converting publication_date to date
+WorksCitedFiltered.df$publication_date<-as.Date(WorksCitedFiltered.df$publication_date)
+
+#Converting all titles to lower case for easier matching. 
+WorksCitedFiltered.df$so <-tolower(WorksCitedFiltered.df$so)
+
+#Removing leading "the" in journal titles for easier matching. 
+WorksCitedFiltered.df$so <- sub("^The\\s", "", WorksCitedFiltered.df$so, ignore.case = TRUE)
+
+#Converting & to "and" for easier matching
+WorksCitedFiltered.df$so <-gsub("&", "and", WorksCitedFiltered.df$so)
+```
+##5.3 Creating the Overlap Dataset
+
+Here we match the filtered works cited with holdings data to find all articles that are covered by our current subscriptions. This is achieved by comparing titles with publication dates and coverage dates. A second dataset of titles that were cited but that are not currently held was also created. 
+```{r}
+#Finding overlapping works
+WorksCitedOverlap.df <-UofSJournals.df %>%
+  filter("ManagedCoverageEnd" <= "publication_date", "publication_date" >= "ManagedCoverageBegin")%>%
+  semi_join(WorksCitedFiltered.df, by = c("Title"="so"))
+
+#Finding unsubscribed works cited
+UnSub.df <- WorksCitedFiltered.df[!(WorksCitedFiltered.df$so %in% WorksCitedOverlap.df$Title),]
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
