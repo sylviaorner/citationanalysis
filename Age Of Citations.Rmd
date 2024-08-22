@@ -1,0 +1,81 @@
+---
+title: "Age of Citations"
+author: "Sylvia Orner"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r  setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+#Load packages
+library(tidyverse)
+```
+```{r}
+#Loading Works
+
+WorksCited.df <-read_rds("workscited.Rds")
+UofSWorksUnique.df <- read_rds("UofSWorksUnique.Rds")
+```
+```{r}
+#Isolating list of referenced works by citing work. 
+
+LongWorks.df <-unnest_longer(UofSWorksUnique.df,col=referenced_works)
+
+#Joining long list to works cited list. 
+
+AgeCited.df <-left_join(WorksCited.df,LongWorks.df,by=c("id"="referenced_works"))
+
+#Adding new column for age when cited (subtracting publishing year of citing article form publishing year of citation article)
+
+AgeWhenCited.df <-AgeCited.df%>%
+mutate(
+publication_year.x=as.numeric(publication_year.x),
+publication_year.y=as.numeric(publication_year.y),
+AgeWhenCited = publication_year.y-publication_year.x
+)
+```
+
+```{r}
+#Count ages
+
+CountByAge.df <-AgeWhenCited.df%>%count(AgeWhenCited, sort=TRUE)
+
+```
+```{r}
+CountByAge.df$n<-as.numeric(CountByAge.df$n)
+
+```
+```{r}
+
+#Creating bins for numerical values
+
+binlabels<-function(breaks){
+  paste(head(breaks, -1),"-", tail(breaks,-1)-1, sep="")
+}
+
+bin_breaks <-seq(0,120, by=5)
+
+bincount<-CountByAge.df%>%
+  mutate(bins=cut(AgeWhenCited, breaks = bin_breaks, right=FALSE, include.lowest = TRUE, labels=binlabels(bin_breaks)))%>%
+  na.omit()%>%
+  group_by(bins)%>%
+  summarize(totalcounts=sum(n))%>%
+  arrange(desc(totalcounts))
+
+```
+
+```{r}
+# Charting the top 20 age ranges 
+topten <-bincount%>%
+  slice(1:20)
+```
+```{r}
+ggplot(topten, aes(x=bins, y=totalcounts))+
+  geom_bar(stat="identity", fill="steelblue")+
+  labs(title="Age Range of Article When Cited", x="Age Range in Years", y="Total Count")+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
